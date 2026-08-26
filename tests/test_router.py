@@ -22,6 +22,9 @@ commands = [
 
     "increase volume",
     "decrease volume",
+    "skip ad",
+    "skip ads",
+    "skip the ad",
 
     "what time is it",
     "who are you",

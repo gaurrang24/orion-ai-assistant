@@ -2,48 +2,28 @@ import gc
 import datetime
 import webbrowser
 import time
-import urllib.parse
+
 from core.router import route_command, Intent
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
+from tools.youtube import YouTubeTool
+from services.chrome import ChromeService
+from tools import system_volume
+from tools.yt_ads import YouTubeAdTool
 
 import numpy as np
 import speech_recognition as sr
 import sounddevice as sd
 from kokoro import KPipeline
 
+
 # ==================================================
 # CHROME / YOUTUBE
 # ==================================================
 
-CHROME_PROFILE = r"C:\Users\prach\OneDrive\Desktop\orion v1.0\orion_chrome_profile"
-
-
-def create_driver():
-    print("Starting Chrome...")
-
-    options = Options()
-    options.add_argument(f"--user-data-dir={CHROME_PROFILE}")
-
-    # Helps prevent some automation-related Chrome issues
-    options.add_argument("--disable-notifications")
-    options.add_argument("--start-maximized")
-
-    new_driver = webdriver.Chrome(options=options)
-    new_driver.get("https://www.youtube.com")
-
-    time.sleep(3)
-
-    print("Chrome ready.")
-    return new_driver
-
-
-driver = create_driver()
+chrome = ChromeService()
+driver = chrome.create_driver()
+youtube = YouTubeTool(chrome)
+youtube_ads = YouTubeAdTool(driver)
 
 # ==================================================
 # ORION TTS
@@ -96,92 +76,6 @@ def speak(text):
 # ==================================================
 # MUSIC
 # ==================================================
-
-def restart_driver():
-    global driver
-
-    print("Restarting Chrome session...")
-
-    try:
-        driver.quit()
-    except Exception:
-        pass
-
-    time.sleep(2)
-    driver = create_driver()
-
-
-def driver_is_alive():
-    global driver
-
-    try:
-        driver.current_url
-        return True
-    except Exception:
-        return False
-
-
-def play_music(song):
-    global driver
-
-    print(f"Playing: {song}")
-
-    # ------------------------------------------
-    # CHECK SELENIUM SESSION
-    # ------------------------------------------
-
-    if not driver_is_alive():
-        print("Chrome session is dead.")
-        restart_driver()
-
-    try:
-        # --------------------------------------
-        # SEARCH YOUTUBE
-        # --------------------------------------
-
-        search_url = (
-            "https://www.youtube.com/results?search_query="
-            + urllib.parse.quote(song)
-        )
-
-        print("Searching YouTube...")
-        driver.get(search_url)
-
-        # --------------------------------------
-        # WAIT FOR SEARCH RESULTS
-        # --------------------------------------
-
-        wait = WebDriverWait(driver, 10)
-
-        first_video = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "ytd-video-renderer a#video-title")
-            )
-        )
-
-        # --------------------------------------
-        # CLICK FIRST RESULT
-        # --------------------------------------
-
-        driver.execute_script("arguments[0].click();", first_video)
-
-        print("Song opened successfully.")
-        time.sleep(2)
-
-    except Exception as e:
-
-        print("YouTube error:", e)
-
-        # --------------------------------------
-        # IF SESSION DIED, RESTART CHROME
-        # --------------------------------------
-
-        if not driver_is_alive():
-            print("Chrome disconnected.")
-            restart_driver()
-            speak("Chrome was disconnected. I restarted it. Please try again.")
-        else:
-            speak("I couldn't find that song.")
 
 
 # ==================================================
@@ -270,16 +164,24 @@ def handle_command(command):
     print("==================================")
     print()
 
-        # ==================================================
+    # ==================================================
     # PLAY MUSIC
     # ==================================================
 
     if result.intent == Intent.PLAY_MUSIC:
 
+        if not chrome.is_alive():
+            chrome.restart()
+
         song = result.parameters.get("song")
 
         if song:
-            play_music(song)
+
+            if youtube.play(song):
+                speak(f"Playing {song}.")
+            else:
+                speak("I couldn't play that song.")
+
         else:
             speak("Which song should I play?")
 
@@ -289,27 +191,12 @@ def handle_command(command):
 
     elif result.intent == Intent.PAUSE_MUSIC:
 
-        try:
-            if driver_is_alive():
+        if not chrome.is_alive():
+            chrome.restart()
 
-                driver.execute_script("""
-                    const video = document.querySelector('video');
-
-                    if (video) {
-                        video.pause();
-                        return true;
-                    }
-
-                    return false;
-                """)
-
-                speak("Music paused.")
-
-            else:
-                speak("Chrome is not available.")
-
-        except Exception as e:
-            print("Pause error:", e)
+        if youtube.pause():
+            speak("Music paused.")
+        else:
             speak("I couldn't pause the music.")
 
     # ==================================================
@@ -318,34 +205,60 @@ def handle_command(command):
 
     elif result.intent == Intent.RESUME_MUSIC:
 
-        try:
-            if driver_is_alive():
+        if not chrome.is_alive():
+            chrome.restart()
 
-                result_js = driver.execute_script("""
-                    const video = document.querySelector('video');
-
-                    if (video) {
-                        video.play();
-                        return true;
-                    }
-
-                    return false;
-                """)
-
-                if result_js:
-                    speak("Music resumed.")
-                else:
-                    speak("I couldn't find the music player.")
-
-            else:
-                speak("Chrome is not available.")
-
-        except Exception as e:
-            print("Resume error:", e)
+        if youtube.resume():
+            speak("Music resumed.")
+        else:
             speak("I couldn't resume the music.")
 
-    
+
+        # ==================================================
+    # SKIP YOUTUBE ADS
+    # ==================================================
+
+    elif result.intent == Intent.SKIP_AD:
+
+        if not chrome.is_alive():
+            chrome.restart()
+
+        if youtube_ads.skip_ads():
+            speak("Ad skipped.")
+        else:
+            speak("I couldn't find a skippable ad.")
+    #volume control
+
+    elif result.intent == Intent.VOLUME_UP:
+        try:
+            system_volume.volume_up()
+            speak("Volume increased.")
+
+        except Exception as e:
+            print("Volume UP error:", repr(e))
+            speak("I couldn't change the volume.")
+
    
+    elif result.intent == Intent.VOLUME_DOWN:
+        try:
+            system_volume.volume_down()
+            speak("Volume decreased.")
+
+        except Exception as e:
+            print("Volume DOWN error:", repr(e))
+            speak("I couldn't change the volume.")
+
+
+    elif result.intent == Intent.SET_VOLUME:
+        try:
+           level = float(result.parameters.get("level", 0.5))
+           system_volume.set_system_volume(level)
+           speak(f"Volume set to {int(level*100)} percent.")
+
+        except Exception as e:
+            print("Volume SET error:", repr(e))
+            speak("I couldn't set the volume.")
+
     # ==================================================
     # OPEN WEBSITE
     # ==================================================
@@ -369,7 +282,9 @@ def handle_command(command):
         elif "github" in website:
 
             speak("Opening GitHub.")
-            webbrowser.open("https://github.com/gaurrang24/orion-ai-assistant.git")
+            webbrowser.open(
+                "https://github.com/gaurrang24/orion-ai-assistant.git"
+            )
 
         else:
 
@@ -420,6 +335,9 @@ def handle_command(command):
 
         speak("Sorry, I don't know that command yet.")
 
+
+
+
     # ==================================================
     # OTHER INTENTS
     # ==================================================
@@ -432,7 +350,6 @@ def handle_command(command):
         )
 
     return True
-
 
 # ==================================================
 # ORION START
@@ -532,7 +449,7 @@ while True:
         print()
         print("Orion shutting down.")
         try:
-            driver.quit()
+            chrome.stop()
         except Exception:
             pass
         break

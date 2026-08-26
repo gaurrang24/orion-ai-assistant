@@ -1,26 +1,23 @@
 import re
 from enum import Enum
 from dataclasses import dataclass
+from tools.yt_ads import YouTubeAdTool
 
 class Intent(Enum):
     OPEN_APPLICATION = "open_application"
     CLOSE_APPLICATION = "close_application"
     MINIMIZE_APPLICATION = "minimize_application"
     MAXIMIZE_APPLICATION = "maximize_application"
-
     OPEN_WEBSITE = "open_website"
-
     PLAY_MUSIC = "play_music"
     PAUSE_MUSIC = "pause_music"
+    SKIP_AD = "skip_ad"
     RESUME_MUSIC = "resume_music"
-
     VOLUME_UP = "volume_up"
     VOLUME_DOWN = "volume_down"
-
+    SET_VOLUME = "set_volume"
     TIME = "time"
-
     CONVERSATION = "conversation"
-
     UNKNOWN = "unknown"
 
 @dataclass
@@ -75,6 +72,15 @@ def classify_intent(command: str) -> Intent:
         "lower volume"
     ]):
         return Intent.VOLUME_DOWN
+
+    if any(phrase in command for phrase in [
+        "skip ad",
+        "skip ads",
+        "skip the ad",
+        "skip advertisement",
+        "skip advertisements"
+    ]):
+       return Intent.SKIP_AD
 
 
     # ==============================
@@ -244,6 +250,7 @@ def route_command(command: str) -> RouteResult:
 
         Intent.VOLUME_UP: "volume_up",
         Intent.VOLUME_DOWN: "volume_down",
+        Intent.SKIP_AD: "skip_ad",
 
         Intent.TIME: "get_time",
 
