@@ -3,31 +3,47 @@ import datetime
 import webbrowser
 import time
 import urllib.parse
+from core.router import route_command, Intent
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 
 import numpy as np
 import speech_recognition as sr
 import sounddevice as sd
 from kokoro import KPipeline
-import pywhatkit
 
 # ==================================================
-# CHROME / YOUTUBE PROFILE
+# CHROME / YOUTUBE
 # ==================================================
 
-chrome_options = Options()
+CHROME_PROFILE = r"C:\Users\prach\OneDrive\Desktop\orion v1.0\orion_chrome_profile"
 
-chrome_options.add_argument(
-    r"--user-data-dir=C:\Users\prach\OneDrive\Desktop\orion v1.0\orion_chrome_profile"
-)
 
-driver = webdriver.Chrome(options=chrome_options)
+def create_driver():
+    print("Starting Chrome...")
 
-driver.get("https://www.youtube.com")
-time.sleep(3)
+    options = Options()
+    options.add_argument(f"--user-data-dir={CHROME_PROFILE}")
+
+    # Helps prevent some automation-related Chrome issues
+    options.add_argument("--disable-notifications")
+    options.add_argument("--start-maximized")
+
+    new_driver = webdriver.Chrome(options=options)
+    new_driver.get("https://www.youtube.com")
+
+    time.sleep(3)
+
+    print("Chrome ready.")
+    return new_driver
+
+
+driver = create_driver()
 
 # ==================================================
 # ORION TTS
@@ -56,47 +72,117 @@ def speak(text):
     """
     print("Orion:", text)
 
-    generator = pipeline(text, voice=VOICE, speed=1.0)
+    try:
+        generator = pipeline(text, voice=VOICE, speed=1.0)
 
-    with sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
-        for _, _, audio in generator:
-            # astype(..., copy=False) avoids an extra copy if it's already float32
-            stream.write(np.asarray(audio, dtype=np.float32))
+        with sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+            for _, _, audio in generator:
+                # asarray avoids an extra copy if it's already float32
+                stream.write(np.asarray(audio, dtype=np.float32))
 
-    # Drop any lingering references and free the generator/chunks promptly
-    del generator
-    gc.collect()
+    except Exception as e:
+        # TTS failing should never crash the assistant
+        print("TTS error:", e)
+
+    finally:
+        # Drop any lingering references and free the generator/chunks promptly
+        try:
+            del generator
+        except NameError:
+            pass
+        gc.collect()
+
 
 # ==================================================
 # MUSIC
 # ==================================================
 
-def play_music(song):
-    print(f"Playing: {song}")
-    speak(f"Playing {song}")
+def restart_driver():
+    global driver
 
-    search_url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote(song)
-
-    driver.get(search_url)
-
-    time.sleep(4)
+    print("Restarting Chrome session...")
 
     try:
-        # Find the first video result
-        first_video = driver.find_element(
-            By.CSS_SELECTOR,
-            "ytd-video-renderer a#video-title"
+        driver.quit()
+    except Exception:
+        pass
+
+    time.sleep(2)
+    driver = create_driver()
+
+
+def driver_is_alive():
+    global driver
+
+    try:
+        driver.current_url
+        return True
+    except Exception:
+        return False
+
+
+def play_music(song):
+    global driver
+
+    print(f"Playing: {song}")
+
+    # ------------------------------------------
+    # CHECK SELENIUM SESSION
+    # ------------------------------------------
+
+    if not driver_is_alive():
+        print("Chrome session is dead.")
+        restart_driver()
+
+    try:
+        # --------------------------------------
+        # SEARCH YOUTUBE
+        # --------------------------------------
+
+        search_url = (
+            "https://www.youtube.com/results?search_query="
+            + urllib.parse.quote(song)
         )
 
-        first_video.click()
+        print("Searching YouTube...")
+        driver.get(search_url)
+
+        # --------------------------------------
+        # WAIT FOR SEARCH RESULTS
+        # --------------------------------------
+
+        wait = WebDriverWait(driver, 10)
+
+        first_video = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "ytd-video-renderer a#video-title")
+            )
+        )
+
+        # --------------------------------------
+        # CLICK FIRST RESULT
+        # --------------------------------------
+
+        driver.execute_script("arguments[0].click();", first_video)
 
         print("Song opened successfully.")
-
-        time.sleep(5)
+        time.sleep(2)
 
     except Exception as e:
-        print("Could not find the song:", e)
-        speak("I couldn't find that song.")
+
+        print("YouTube error:", e)
+
+        # --------------------------------------
+        # IF SESSION DIED, RESTART CHROME
+        # --------------------------------------
+
+        if not driver_is_alive():
+            print("Chrome disconnected.")
+            restart_driver()
+            speak("Chrome was disconnected. I restarted it. Please try again.")
+        else:
+            speak("I couldn't find that song.")
+
 
 # ==================================================
 # SPEECH RECOGNITION
@@ -123,6 +209,231 @@ with microphone as source:
 print("Microphone ready.")
 
 
+def listen(timeout, phrase_time_limit):
+    """
+    Shared listen+recognize helper so audio buffers don't linger
+    as separate variables across the main loop.
+
+    Raises:
+        sr.WaitTimeoutError   - no speech started within `timeout`
+        sr.UnknownValueError  - speech was captured but not understood
+        sr.RequestError       - the recognition service failed/unreachable
+    """
+    with microphone as source:
+        audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
+
+    try:
+        text = recognizer.recognize_google(audio, language="en-IN").lower().strip()
+    finally:
+        # audio can hold several seconds of raw samples; release it explicitly
+        del audio
+
+    return text
+
+
+# ==================================================
+# COMMAND HANDLING
+# ==================================================
+
+SLEEP_PHRASES = ("go to sleep", "go sleep", "sleep", "stop listening", "stop")
+
+def handle_command(command):
+    """
+    Route the user's command through router.py
+    and execute the appropriate Orion action.
+    """
+
+    # ==================================================
+    # SLEEP
+    # ==================================================
+
+    if command in SLEEP_PHRASES or any(
+        p in command
+        for p in ("go to sleep", "go sleep", "stop listening")
+    ):
+        speak("Going back to sleep.")
+        return False
+
+    # ==================================================
+    # ROUTER
+    # ==================================================
+
+    result = route_command(command)
+
+    print()
+    print("========== ORION ROUTER ==========")
+    print("Command:", command)
+    print("Intent:", result.intent)
+    print("Tool:", result.tool)
+    print("Parameters:", result.parameters)
+    print("Confidence:", result.confidence)
+    print("==================================")
+    print()
+
+        # ==================================================
+    # PLAY MUSIC
+    # ==================================================
+
+    if result.intent == Intent.PLAY_MUSIC:
+
+        song = result.parameters.get("song")
+
+        if song:
+            play_music(song)
+        else:
+            speak("Which song should I play?")
+
+    # ==================================================
+    # PAUSE MUSIC
+    # ==================================================
+
+    elif result.intent == Intent.PAUSE_MUSIC:
+
+        try:
+            if driver_is_alive():
+
+                driver.execute_script("""
+                    const video = document.querySelector('video');
+
+                    if (video) {
+                        video.pause();
+                        return true;
+                    }
+
+                    return false;
+                """)
+
+                speak("Music paused.")
+
+            else:
+                speak("Chrome is not available.")
+
+        except Exception as e:
+            print("Pause error:", e)
+            speak("I couldn't pause the music.")
+
+    # ==================================================
+    # RESUME MUSIC
+    # ==================================================
+
+    elif result.intent == Intent.RESUME_MUSIC:
+
+        try:
+            if driver_is_alive():
+
+                result_js = driver.execute_script("""
+                    const video = document.querySelector('video');
+
+                    if (video) {
+                        video.play();
+                        return true;
+                    }
+
+                    return false;
+                """)
+
+                if result_js:
+                    speak("Music resumed.")
+                else:
+                    speak("I couldn't find the music player.")
+
+            else:
+                speak("Chrome is not available.")
+
+        except Exception as e:
+            print("Resume error:", e)
+            speak("I couldn't resume the music.")
+
+    
+   
+    # ==================================================
+    # OPEN WEBSITE
+    # ==================================================
+
+    elif result.intent == Intent.OPEN_WEBSITE:
+
+        website = result.parameters.get(
+            "website", ""
+        ).lower().strip()
+
+        if "youtube" in website:
+
+            speak("Opening YouTube.")
+            webbrowser.open("https://www.youtube.com/")
+
+        elif "google" in website:
+
+            speak("Opening Google.")
+            webbrowser.open("https://www.google.com")
+
+        elif "github" in website:
+
+            speak("Opening GitHub.")
+            webbrowser.open("https://github.com/gaurrang24/orion-ai-assistant.git")
+
+        else:
+
+            speak(
+                f"I don't know how to open {website} yet."
+            )
+
+    # ==================================================
+    # TIME
+    # ==================================================
+
+    elif result.intent == Intent.TIME:
+
+        current_time = datetime.datetime.now().strftime("%I:%M %p")
+
+        speak(f"The time is {current_time}.")
+
+    # ==================================================
+    # CONVERSATION
+    # ==================================================
+
+    elif result.intent == Intent.CONVERSATION:
+
+        if "who are you" in command:
+
+            speak("I am Orion, your personal voice assistant.")
+
+        elif "what can you do" in command:
+
+            speak(
+                "I can open websites, play music, control applications, "
+                "and help you with various tasks."
+            )
+
+        elif command in ("hello", "hi"):
+
+            speak("Hello. How can I help you?")
+
+        else:
+
+            speak("Hello. How can I help you?")
+
+    # ==================================================
+    # UNKNOWN
+    # ==================================================
+
+    elif result.intent == Intent.UNKNOWN:
+
+        speak("Sorry, I don't know that command yet.")
+
+    # ==================================================
+    # OTHER INTENTS
+    # ==================================================
+
+    else:
+
+        speak(
+            f"I detected {result.intent.value}, "
+            "but that function is not connected yet."
+        )
+
+    return True
+
+
 # ==================================================
 # ORION START
 # ==================================================
@@ -136,18 +447,7 @@ print("Orion is sleeping...")
 print("Say 'Orion' to wake me.")
 print()
 
-
-def listen(timeout, phrase_time_limit):
-    """Shared listen+recognize helper so audio buffers don't linger
-    as separate variables across the main loop."""
-    with microphone as source:
-        audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-
-    text = recognizer.recognize_google(audio, language="en-IN").lower().strip()
-
-    # audio can hold several seconds of raw samples; release it explicitly
-    del audio
-    return text
+WAKE_WORDS = ("orion", "hey orion")
 
 # ==================================================
 # MAIN LOOP
@@ -161,135 +461,80 @@ while True:
         # SLEEP MODE
         # ------------------------------------------
 
-        print("😴 Waiting for wake word...")
-        command = listen(timeout=10, phrase_time_limit=4)
+        print("Waiting for wake word...")
+
+        try:
+            command = listen(timeout=5, phrase_time_limit=3)
+        except sr.WaitTimeoutError:
+            continue
+        except sr.UnknownValueError:
+            continue
+        except sr.RequestError as e:
+            print("Speech recognition error:", e)
+            continue
 
         print("You said:", command)
-
 
         # ------------------------------------------
         # WAKE ORION
         # ------------------------------------------
 
-        if command in ["orion", "hey orion"]:
+        if command in WAKE_WORDS or any(w in command for w in WAKE_WORDS):
 
             speak("Yes, I'm listening.")
-            # Give the speaker/microphone time to settle
-          
+            time.sleep(2)  # let mic/speaker settle
+
             # ======================================
             # ACTIVE CONVERSATION MODE
             # ======================================
 
             while True:
 
-                print("🎤 Listening for your command...")
+                print("Listening for your command...")
 
                 try:
-                    command = listen(
-                        timeout=10,
-                        phrase_time_limit=8
-                    )
-
+                    command = listen(timeout=5, phrase_time_limit=3)
                     print("Command:", command)
 
                 except sr.WaitTimeoutError:
                     print("No command detected.")
                     continue
 
-                # --------------------------------------
-                # GO BACK TO SLEEP
-                # --------------------------------------
+                except sr.UnknownValueError:
+                    print("I couldn't understand that.")
+                    continue
 
-                if (
-                    "go to sleep" in command
-                    or "go sleep" in command
-                    or command == "sleep"
-                    or "stop listening" in command
-                ):
-                    speak("Going back to sleep.")
+                except sr.RequestError as e:
+                    print("Speech recognition error:", e)
+                    continue
+
+                keep_going = handle_command(command)
+                if not keep_going:
                     break
-
-            # --------------------------------------
-            # COMMANDS
-            # --------------------------------------
-
-                if "hello" in command:
-                    speak("Hello. How can I help you?")
-
-                elif "how are you" in command:
-                    speak("I'm doing great. Thank you for asking.")
-
-                elif "who are you" in command:
-                    speak("I am Orion, your personal voice assistant.")
-
-                elif "time" in command:
-                    current_time = datetime.datetime.now().strftime("%I:%M %p")
-                    speak(f"The time is {current_time}.")
-
-                elif command.startswith("play "):
-                   song = command[5:].strip()
-
-                   if song:
-                       play_music(song)
-                   else:
-                       speak("Which song should I play?")
-
-                elif "open youtube" in command:
-                    speak("Opening YouTube.")
-                    webbrowser.open("https://www.youtube.com/")
-
-                elif "open google" in command:
-                    speak("Opening Google.")
-                    webbrowser.open("https://www.google.com")
-
-                elif "open udemy" in command:
-                    speak("Opening Udemy.")
-                    webbrowser.open("https://www.udemy.com/course/100-days-of-code/learn/lecture/23544648#overview")
-
-                elif "open google" in command:
-                    speak("Opening Google.")
-                    webbrowser.open("https://www.google.com")
-
-                elif "open chatgpt" in command:
-                    speak("Opening ChatGPT.")
-                    webbrowser.open("https://chatgpt.com")
-
-                elif "stop" in command or "go to sleep" in command:
-                    speak("Going back to sleep.")
- 
-                else:
-                    speak("Sorry, I don't know that command yet.")
-
 
             # --------------------------------------
             # BACK TO SLEEP
             # --------------------------------------
 
             print()
-            print("😴 Orion is sleeping...")
+            print("Orion is sleeping...")
             print("Say 'Orion' to wake me.")
             print()
 
             # Free anything accumulated during this wake cycle
             gc.collect()
 
-
     # ==================================================
-    # ERROR HANDLING
+    # ERROR HANDLING (outer loop safety net)
     # ==================================================
-
-    except sr.WaitTimeoutError:
-        print("No speech detected.")
-
-    except sr.UnknownValueError:
-        print("I couldn't understand that.")
-
-    except sr.RequestError as e:
-        print("Speech recognition error:", e)
 
     except KeyboardInterrupt:
         print()
         print("Orion shutting down.")
+        try:
+            driver.quit()
+        except Exception:
+            pass
         break
 
     except Exception as e:
