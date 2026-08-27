@@ -72,6 +72,9 @@ def classify_intent(command: str) -> Intent:
         "lower volume"
     ]):
         return Intent.VOLUME_DOWN
+        # SET VOLUME
+    if re.search(r"\b(?:set\s+)?(?:the\s+)?(?:volume|sound)\s+(?:to\s+)?\d{1,3}\s*%?", command):
+        return Intent.SET_VOLUME
 
     if any(phrase in command for phrase in [
         "skip ad",
@@ -206,6 +209,20 @@ def extract_parameters(command: str, intent: Intent) -> dict:
               if song:
                   return {"song": song}
 
+    if intent == Intent.SET_VOLUME:
+        match = re.search(r"\b(\d{1,3})\s*%?", command)
+
+        if match:
+            percentage = int(match.group(1))
+
+            # Keep volume between 0% and 100%
+            percentage = max(0, min(100, percentage))
+
+            return {
+                "level": percentage / 100
+            }
+
+        return {}
     if intent == Intent.VOLUME_UP:
         match = re.search(r"\bby\s+(\d+)\b", command)
 
@@ -251,7 +268,7 @@ def route_command(command: str) -> RouteResult:
         Intent.VOLUME_UP: "volume_up",
         Intent.VOLUME_DOWN: "volume_down",
         Intent.SKIP_AD: "skip_ad",
-
+        Intent.SET_VOLUME: "set_volume",
         Intent.TIME: "get_time",
 
         Intent.CONVERSATION: "conversation",
