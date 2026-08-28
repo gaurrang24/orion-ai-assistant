@@ -10,7 +10,6 @@ from selenium.webdriver.chrome.options import Options
 # ==========================================================
 
 CHROME_PROFILE = r"C:\Users\prach\OneDrive\Desktop\orion v1.0\orion\orion_chrome_profile"
-
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 DEBUG_PORT = 9222
@@ -30,22 +29,46 @@ class ChromeService:
 
         print("Starting Orion Chrome...")
 
-        # Start Chrome with Orion's dedicated profile
-        self.chrome_process = subprocess.Popen([
-            CHROME_EXE,
-            f"--remote-debugging-port={DEBUG_PORT}",
-            f"--user-data-dir={CHROME_PROFILE}",
-            "--disable-notifications",
-            "--start-maximized",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--remote-allow-origins=*"
-        ])
+        # If an old Selenium session exists, clean it first
+        if self.driver is not None:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
 
-        print("Chrome process started.")
+            self.driver = None
 
-        # Give Chrome time to start
-        time.sleep(3)
+        # Start Chrome
+        try:
+
+            self.chrome_process = subprocess.Popen([
+                CHROME_EXE,
+
+                f"--remote-debugging-port={DEBUG_PORT}",
+
+                f"--user-data-dir={CHROME_PROFILE}",
+
+                "--disable-notifications",
+                "--start-maximized",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--remote-allow-origins=*"
+            ])
+
+            print("Chrome process started.")
+
+        except Exception as e:
+
+            print("Chrome start error:", repr(e))
+            return None
+
+        # ==================================================
+        # WAIT FOR CHROME
+        # ==================================================
+
+        print("Waiting for Chrome...")
+
+        time.sleep(5)
 
         # ==================================================
         # CONNECT SELENIUM
@@ -58,28 +81,48 @@ class ChromeService:
             f"127.0.0.1:{DEBUG_PORT}"
         )
 
-        try:
+        # Try connection several times
+        for attempt in range(5):
 
-            self.driver = webdriver.Chrome(options=options)
+            try:
 
-            print("Selenium connected to Chrome.")
+                print(
+                    f"Connecting Selenium to Chrome "
+                    f"(attempt {attempt + 1}/5)..."
+                )
 
-            # Open YouTube
-            self.driver.get("https://www.youtube.com")
+                self.driver = webdriver.Chrome(options=options)
 
-            time.sleep(2)
+                print("Selenium connected to Chrome.")
 
-            print("Chrome ready.")
+                # Test session
+                self.driver.title
 
-            return self.driver
+                print("Chrome Selenium session is alive.")
 
-        except Exception as e:
+                # Open YouTube
+                self.driver.get("https://www.youtube.com")
 
-            print("Chrome connection error:", e)
+                time.sleep(3)
 
-            self.driver = None
+                print("Chrome ready.")
 
-            return None
+                return self.driver
+
+            except Exception as e:
+
+                print(
+                    "Selenium connection failed:",
+                    repr(e)
+                )
+
+                self.driver = None
+
+                time.sleep(2)
+
+        print("Could not connect Selenium to Chrome.")
+
+        return None
 
     # ======================================================
     # CHECK CHROME / SELENIUM SESSION
@@ -90,13 +133,28 @@ class ChromeService:
         try:
 
             if self.driver is None:
+
+                print("Chrome DEBUG: driver is None")
+
                 return False
 
-            self.driver.current_url
+            # Test Selenium session
+            self.driver.title
+
+            print(
+                "Chrome DEBUG: Selenium session is alive"
+            )
 
             return True
 
-        except Exception:
+        except Exception as e:
+
+            print(
+                "Chrome DEBUG: Selenium session error:",
+                repr(e)
+            )
+
+            self.driver = None
 
             return False
 
@@ -129,16 +187,23 @@ class ChromeService:
                     self.chrome_process.terminate()
 
                     try:
-                        self.chrome_process.wait(timeout=3)
+
+                        self.chrome_process.wait(
+                            timeout=3
+                        )
 
                     except subprocess.TimeoutExpired:
+
                         self.chrome_process.kill()
 
                 self.chrome_process = None
 
         except Exception as e:
 
-            print("Chrome process cleanup error:", e)
+            print(
+                "Chrome process cleanup error:",
+                repr(e)
+            )
 
         time.sleep(2)
 
@@ -150,10 +215,8 @@ class ChromeService:
 
         print("Restarting Chrome session...")
 
-        # Close old Chrome
         self.stop()
 
         time.sleep(2)
 
-        # Start new Chrome
         return self.create_driver()

@@ -9,6 +9,7 @@ from tools.youtube import YouTubeTool
 from services.chrome import ChromeService
 from tools import system_volume
 from tools.yt_ads import YouTubeAdTool
+from tools.windows_control import WindowsControlTool
 
 import numpy as np
 import speech_recognition as sr
@@ -24,6 +25,7 @@ chrome = ChromeService()
 driver = chrome.create_driver()
 youtube = YouTubeTool(chrome)
 youtube_ads = YouTubeAdTool(driver)
+windows = WindowsControlTool()
 
 # ==================================================
 # ORION TTS
@@ -131,6 +133,69 @@ def listen(timeout, phrase_time_limit):
 
 SLEEP_PHRASES = ("go to sleep", "go sleep", "sleep", "stop listening", "stop")
 
+def confirm_action(message):
+    speak(message)
+
+    # Give the speaker a moment to finish before opening the microphone
+    time.sleep(1)
+
+    try:
+        response = listen(timeout=8, phrase_time_limit=4)
+
+        print("Confirmation:", response)
+
+        positive_responses = [
+            "yes",
+            "yeah",
+            "yep",
+            "yes please",
+            "sure",
+            "okay",
+            "ok",
+            "do it",
+            "confirm",
+            "go ahead"
+        ]
+
+        negative_responses = [
+            "no",
+            "nope",
+            "cancel",
+            "don't",
+            "do not",
+            "never mind",
+            "never"
+        ]
+
+        if response in positive_responses:
+            return True
+
+        if response in negative_responses:
+            return False
+
+        # Handle longer natural responses
+        if any(word in response for word in [
+            "yes",
+            "sure",
+            "go ahead",
+            "do it"
+        ]):
+            return True
+
+        return False
+
+    except sr.WaitTimeoutError:
+        speak("I didn't hear a confirmation.")
+        return False
+
+    except sr.UnknownValueError:
+        speak("I couldn't understand your confirmation.")
+        return False
+
+    except sr.RequestError as e:
+        print("Confirmation speech error:", e)
+        speak("I couldn't verify your confirmation.")
+        return False
 def handle_command(command):
     """
     Route the user's command through router.py
@@ -170,8 +235,13 @@ def handle_command(command):
 
     if result.intent == Intent.PLAY_MUSIC:
 
-        if not chrome.is_alive():
-            chrome.restart()
+        print("DEBUG: Checking Chrome...")
+        alive = chrome.is_alive()
+        print("DEBUG: Chrome alive =", alive)
+
+        if not alive:
+           print("DEBUG: Chrome reported dead. Restarting...")
+           chrome.restart()
 
         song = result.parameters.get("song")
 
@@ -259,6 +329,55 @@ def handle_command(command):
             print("Volume SET error:", repr(e))
             speak("I couldn't set the volume.")
 
+
+        # ==================================================
+    # WINDOWS - SCREENSHOT
+    # ==================================================
+
+    elif result.intent == Intent.TAKE_SCREENSHOT:
+
+        try:
+            path = windows.screenshot()
+
+            if path:
+                speak("Screenshot taken.")
+                print(f"Screenshot saved to: {path}")
+            else:
+                speak("I couldn't take the screenshot.")
+
+        except Exception as e:
+            print("Screenshot error:", repr(e))
+            speak("I couldn't take the screenshot.")
+
+        # ==================================================
+    # WINDOWS - LOCK COMPUTER
+    # ==================================================
+
+    elif result.intent == Intent.LOCK_COMPUTER:
+
+        try:
+            speak("Locking your computer.")
+            windows.lock()
+
+        except Exception as e:
+            print("Lock error:", repr(e))
+            speak("I couldn't lock the computer.")     
+
+        # ==================================================
+    # WINDOWS - RESTART COMPUTER
+    # ==================================================
+
+    elif result.intent == Intent.RESTART_COMPUTER:
+
+        confirmed = confirm_action(
+            "Are you sure you want to restart your computer?"
+        )
+
+        if confirmed:
+            speak("Restarting your computer.")
+            windows.restart()
+        else:
+            speak("Restart cancelled.")   
     # ==================================================
     # OPEN WEBSITE
     # ==================================================

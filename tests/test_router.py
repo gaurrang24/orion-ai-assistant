@@ -29,6 +29,15 @@ commands = [
     "what time is it",
     "who are you",
     "do something random"
+
+    "lock computer",
+    "restart my computer",
+    "restart computer",
+    "reboot my pc",
+    "shutdown computer",
+    "sleep computer",
+    "take screenshot",\
+    "do something random",
 ]
 
 
